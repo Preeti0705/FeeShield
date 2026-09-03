@@ -1,0 +1,2 @@
+dispute_id,payment_id,merchant_id,dispute_date,disputed_amount,chargeback_fee,outcome,notes
+DIS006,PAY006,MER002,2024-02-07,12000.000000,250.000000,merchant_loss,PLANTED:legitimate_chargeback

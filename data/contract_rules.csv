@@ -1,0 +1,14 @@
+rule_id,contract_id,payment_method,card_category,volume_tier_min_gmv,mdr_rate,fixed_fee,tax_rate
+RUL001,CON001,card,credit,0,1.80,0,18.00
+RUL002,CON001,card,debit,0,0.90,0,18.00
+RUL003,CON001,upi,na,0,0.00,0,0.00
+RUL004,CON002,card,credit,0,1.50,0,18.00
+RUL005,CON002,card,credit,500000,1.20,0,18.00
+RUL006,CON002,card,credit,2000000,1.00,0,18.00
+RUL007,CON002,card,debit,0,0.75,0,18.00
+RUL008,CON002,upi,na,0,0.00,0,0.00
+RUL009,CON003,card,credit,0,1.60,0,18.00
+RUL010,CON003,card,credit,500000,1.30,0,18.00
+RUL011,CON003,card,debit,0,0.80,0,18.00
+RUL012,CON003,card,debit,500000,0.60,0,18.00
+RUL013,CON003,upi,na,0,0.00,0,0.00

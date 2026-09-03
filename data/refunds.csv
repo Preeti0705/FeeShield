@@ -1,0 +1,2 @@
+refund_id,payment_id,merchant_id,refund_date,refund_amount,reason,notes
+REF005,PAY005,MER001,2024-01-27,5000.000000,customer_request,PLANTED:legitimate_refund

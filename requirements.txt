@@ -1,0 +1,6 @@
+pandas
+pytest
+streamlit
+google-generativeai
+langgraph 
+anthropic

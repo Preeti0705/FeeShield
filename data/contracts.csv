@@ -1,0 +1,4 @@
+contract_id,merchant_id,gateway_id,version,effective_from,effective_to,status
+CON001,MER001,GW_ALPHA,1,2024-01-01,2024-01-31,superseded
+CON002,MER001,GW_ALPHA,2,2024-02-01,2024-12-31,active
+CON003,MER002,GW_BETA,1,2024-01-01,2024-12-31,active
