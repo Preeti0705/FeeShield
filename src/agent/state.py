@@ -39,6 +39,15 @@ class AuditState(TypedDict):
     # One entry per investigation: agrees or flags for human review
     reviews: Annotated[list[dict], operator.add]
 
+    # Reviewer's batch-level routing signal — drives the conditional edge.
+    # 'approved'     → all findings verified, proceed to Orchestrator
+    # 'escalate'     → at least one high-confidence, high-value finding, fast-track escalation
+    # 'human_review' → investigator/classifier disagreement, route to human queue
+    reviewer_verdict: str
+
+    # payment_ids flagged by Reviewer as needing human review (investigator/classifier mismatch)
+    human_review_pids: Annotated[list[str], operator.add]
+
     # --- Orchestrator output ---
     final_claims:     list[dict]  # Orchestrator-approved claims, ready for filing
     dispute_letter:   str         # Gemini-generated formal dispute letter (markdown)

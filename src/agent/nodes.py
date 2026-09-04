@@ -202,59 +202,190 @@ def investigator_node(state: AuditState, contract_rules_dicts: list[dict]) -> di
     return {"investigations": investigations}
 
 
-# ── Node 2: Reviewer ───────────────────────────────────────────────────────────
+# Root cause synonyms — deterministic classifier uses short labels;
+# LLM may produce slightly different capitalisation / underscores.
+_BANK_CAUSE_ALIASES = {
+    "SETTLEMENT_NOT_POSTED":   "SETTLEMENT_NOT_POSTED",
+    "settlement_not_posted":   "SETTLEMENT_NOT_POSTED",
+    "SETTLEMENT_POSTED_LATE":  "SETTLEMENT_POSTED_LATE",
+    "settlement_posted_late":  "SETTLEMENT_POSTED_LATE",
+    "POSTED_AMOUNT_MISMATCH":  "POSTED_AMOUNT_MISMATCH",
+    "posted_amount_mismatch":  "POSTED_AMOUNT_MISMATCH",
+    "POSTING_REVERSED":        "POSTING_REVERSED",
+    "posting_reversed":        "POSTING_REVERSED",
+    "HOLD_PLACED_THEN_CLEARED": "HOLD_PLACED_THEN_CLEARED",
+    "hold_placed_then_cleared": "HOLD_PLACED_THEN_CLEARED",
+}
+
+# Notes field in variance records uses free text; normalise to classifier labels.
+_NOTES_TO_CAUSE = {
+    "wrong_mdr":                "wrong_mdr",
+    "missed_volume_tier":       "missed_volume_tier",
+    "volume":                   "missed_volume_tier",
+    "tier":                     "missed_volume_tier",
+    "wrong_tax_base":           "wrong_tax_base",
+    "tax":                      "wrong_tax_base",
+    "duplicate_fee":            "duplicate_fee",
+    "duplicate":                "duplicate_fee",
+    "contract_version_violation": "contract_version_violation",
+    "version":                  "contract_version_violation",
+    "v1":                       "contract_version_violation",
+    "stale":                    "contract_version_violation",
+}
+
+# Escalation threshold — a finding above this value that also disagrees with
+# the classifier is routed to the ESCALATE path instead of HUMAN_REVIEW,
+# because the financial stakes are too high to sit in a review queue.
+_ESCALATION_VALUE_THRESHOLD = Decimal("1000")
+
+
+def _normalise_cause(raw: str | None, notes: str = "") -> str | None:
+    """
+    Normalise raw root cause labels to a canonical form for comparison.
+    Checks bank aliases first, then notes-to-cause mapping.
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    if raw in _BANK_CAUSE_ALIASES:
+        return _BANK_CAUSE_ALIASES[raw]
+    # Direct fee-cause match
+    if raw in _NOTES_TO_CAUSE:
+        return _NOTES_TO_CAUSE[raw]
+    return raw  # return as-is for comparison; will likely not match
+
+
+def _det_cause_from_notes(notes: str) -> str | None:
+    """
+    Derive the deterministic classifier's root-cause label from the 'notes' field
+    in a FeeVarianceRecord. The notes field uses the same label vocabulary as the
+    classifier, so we just normalise case/substring matching.
+    """
+    notes_lower = notes.lower()
+    for key, label in _NOTES_TO_CAUSE.items():
+        if key in notes_lower:
+            return label
+    return None
+
 
 def reviewer_node(state: AuditState) -> dict:
     """
     Reviewer agent: deterministic verification of Investigator findings.
     NO LLM — pure Python logic.
 
-    Compares the root_cause label in the Investigator's JSON output against
-    the pre-computed label from classifier.py. If they agree → approved.
-    If they differ → flagged for human review (still included, but marked).
+    For each Investigator finding:
+      1. Extract the root_cause label from the LLM JSON output.
+      2. Look up the deterministic classifier’s label (from the notes field of
+         the variance record, which the classifier wrote during run_audit.py).
+      3. Compare — agree / disagree / no_label.
+
+    Agreement policy:
+      - agree     → LLM and classifier agree on the root cause label.
+      - disagree  → both produced a label but they differ.
+      - no_label  → LLM could not produce a parseable root cause.
+
+    Batch routing (reviewer_verdict — drives the conditional edge in graph.py):
+      - If ANY finding has high financial impact (> Rs 1,000) AND disagrees/no_label
+        → 'escalate'  (too risky to sit in a human queue)
+      - Elif ANY finding is disagree or no_label
+        → 'human_review'
+      - Else (all agree)
+        → 'approved'
+
+    Why no LLM here?
+      The Reviewer is the mathematical backstop. Its entire value comes from being
+      independent of the Investigator. If the Reviewer also used Gemini, a single
+      model failure or hallucination could corrupt BOTH verdicts simultaneously.
+      Deterministic Python cannot hallucinate.
     """
     investigations = state.get("investigations", [])
     variance_records = state["variance_records"]
+    bank_gaps = state["bank_gaps"]
+
+    # Build lookup maps
     var_by_pid = {r["payment_id"]: r for r in variance_records}
+    gap_by_pid = {g["payment_id"]: g for g in bank_gaps}
 
     reviews = []
+    human_review_pids: list[str] = []
+
     for inv in investigations:
         pid = inv["payment_id"]
+        inv_type = inv.get("investigation_type", "fee_variance")
         llm_text = inv.get("llm_output", "")
 
-        # Try to parse root_cause from LLM output
-        llm_root_cause = _extract_root_cause_from_llm(llm_text)
+        # 1. Extract LLM root cause
+        llm_root_cause_raw = _extract_root_cause_from_llm(llm_text)
+        llm_root_cause = _normalise_cause(llm_root_cause_raw)
 
-        # Get the deterministic classifier's label
+        # 2. Get deterministic classifier label
         det_root_cause = None
-        var_rec = var_by_pid.get(pid)
-        if var_rec and var_rec.get("has_variance"):
-            from src.audit.fee_variance import FeeVarianceRecord
-            from src.contracts.models import ContractRule
-            det_root_cause = var_rec.get("notes", "")  # simplified: use notes field
+        financial_impact = Decimal("0")
 
-        # Compare
-        if llm_root_cause and llm_root_cause == inv.get("investigation_type", ""):
-            agreement = "agree"
+        if inv_type == "fee_variance":
+            var_rec = var_by_pid.get(pid, {})
+            notes = var_rec.get("notes", "")
+            det_root_cause = _det_cause_from_notes(notes)
+            try:
+                financial_impact = Decimal(str(var_rec.get("fee_variance_inr", "0")))
+            except Exception:
+                financial_impact = Decimal("0")
+        elif inv_type == "bank_gap":
+            gap = gap_by_pid.get(pid, {})
+            det_root_cause = _normalise_cause(gap.get("gap_type", ""))
+            try:
+                financial_impact = Decimal(str(gap.get("cash_impact_inr", "0")))
+            except Exception:
+                financial_impact = Decimal("0")
+
+        # 3. Agreement verdict
+        if llm_root_cause and det_root_cause:
+            agreement = "agree" if llm_root_cause == det_root_cause else "disagree"
         elif llm_root_cause:
-            agreement = "agree"  # LLM produced a label; trust it for now
+            # Classifier had no label (bank gap with unknown type etc.) but LLM did — accept
+            agreement = "agree"
         else:
-            agreement = "no_label"
+            agreement = "no_label"  # LLM failed to produce parseable JSON
 
-        confidence = compute_confidence_score(llm_root_cause or "fee_variance_other")
+        # 4. Per-finding approval
+        approved = agreement == "agree"
+        if not approved:
+            human_review_pids.append(pid)
+
+        confidence = compute_confidence_score(llm_root_cause or det_root_cause or "fee_variance_other")
 
         reviews.append({
-            "payment_id": pid,
-            "settlement_id": inv.get("settlement_id", ""),
-            "investigation_type": inv["investigation_type"],
-            "llm_root_cause": llm_root_cause,
-            "reviewer_agreement": agreement,
-            "confidence_score": confidence,
-            "approved": agreement in ("agree",),
-            "llm_summary": llm_text[:500] if llm_text else "",
+            "payment_id":          pid,
+            "settlement_id":       inv.get("settlement_id", ""),
+            "investigation_type":  inv_type,
+            "llm_root_cause":      llm_root_cause,
+            "det_root_cause":      det_root_cause,
+            "reviewer_agreement":  agreement,
+            "confidence_score":    confidence,
+            "approved":            approved,
+            "financial_impact_inr": str(financial_impact),
+            "llm_summary":         llm_text[:500] if llm_text else "",
         })
 
-    return {"reviews": reviews}
+    # 5. Batch routing verdict
+    has_high_value_mismatch = any(
+        not r["approved"] and Decimal(r["financial_impact_inr"]) > _ESCALATION_VALUE_THRESHOLD
+        for r in reviews
+    )
+    has_any_mismatch = any(not r["approved"] for r in reviews)
+
+    if has_high_value_mismatch:
+        verdict = "escalate"
+    elif has_any_mismatch:
+        verdict = "human_review"
+    else:
+        verdict = "approved"
+
+    return {
+        "reviews":          reviews,
+        "reviewer_verdict": verdict,
+        "human_review_pids": human_review_pids,
+    }
 
 
 # ── Node 3: Orchestrator ───────────────────────────────────────────────────────

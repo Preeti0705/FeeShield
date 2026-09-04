@@ -36,6 +36,7 @@ from src.confidence.scorer import compute_confidence_score
 from src.evidence.builder import build_fee_claim_item, build_bank_claim_item
 from src.leakage.aggregator import aggregate_audit_results
 from src.agent.graph import run_agent_audit
+from src.agent.orchestrator import route_batch_outcomes
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -49,7 +50,7 @@ def _load_raw(filename: str) -> list[dict]:
 def main():
     print("\n" + "=" * 70)
     print("  AI FINANCE CONTROLLER -- AGENT LAYER")
-    print("  Investigator -> Reviewer -> Orchestrator")
+    print("  Investigator -> Reviewer -[conditional]-> Orchestrator | HumanQueue")
     print("=" * 70)
 
     # Check API key early
@@ -153,29 +154,66 @@ def main():
     )
 
     # ── 3. Output ─────────────────────────────────────────────────────────────
-    print("\n[3/3] Agent results:\n")
+    print("\n[3/4] Agent verdicts:\n")
 
     reviews = final_state.get("reviews", [])
+    routing = final_state.get("routing_decision", "unknown")
+    human_pids = final_state.get("human_review_pids", [])
+
     print(f"  Reviews completed: {len(reviews)}")
     for rev in reviews:
-        status = "[APPROVED]" if rev["approved"] else "[HUMAN REVIEW]"
-        print(f"    {status}  {rev['payment_id']:8s}  {rev.get('llm_root_cause','?'):35s}  conf={rev['confidence_score']}")
+        if rev["approved"]:
+            status = "[APPROVED]   "
+        else:
+            status = "[HUMAN REVIEW]"
+        cause = rev.get('llm_root_cause') or rev.get('det_root_cause') or '?'
+        agr = rev.get('reviewer_agreement', '?')
+        print(f"    {status}  {rev['payment_id']:8s}  {cause:35s}  agreement={agr:8s}  conf={rev['confidence_score']}")
 
-    routing = final_state.get("routing_decision", "unknown")
-    print(f"\n  Routing decision: {routing.upper()}")
+    if human_pids:
+        print(f"\n  [!] Human review queue: {', '.join(human_pids)}")
+        print("      These findings need analyst inspection before a claim is filed.")
 
-    batch_summary = final_state.get("batch_summary", "")
-    if batch_summary:
-        print(f"\n  Batch summary:\n  {batch_summary[:400]}")
+    print(f"\n  Graph routing_decision : {routing.upper()}")
 
+    # ── 4. Batch routing report ───────────────────────────────────────────────
+    print("\n[4/4] Computing batch routing report...")
+
+    batch_report = route_batch_outcomes(
+        variance_records=variance_dicts,
+        bank_gaps=bank_gap_dicts,
+        reviews=reviews,
+        routing_decision=routing,
+        total_volume_inr=summary.total_volume_inr,
+        total_fee_leakage_inr=summary.total_fee_leakage_inr,
+        total_bank_cash_at_risk_inr=summary.total_bank_cash_at_risk_inr,
+    )
+
+    print(batch_report.as_text_report())
+
+    # Validate invariants loudly so we know the numbers add up
+    violations = batch_report.validate_invariants()
+    if violations:
+        print("\n[WARN] Batch report invariant violations:")
+        for v in violations:
+            print(f"  - {v}")
+    else:
+        print("  [OK] Batch invariants verified: auto_matched + investigated == total_processed")
+        print(f"  [OK] Sub-buckets sum:           {batch_report.claim_ready} + {batch_report.escalated} + {batch_report.monitoring} + {batch_report.human_review} == {batch_report.investigated}")
+
+    # ── 5. Dispute letter ────────────────────────────────────────────────────
     letter = final_state.get("dispute_letter", "")
     if letter:
         letter_path = DATA_DIR / "dispute_letter.md"
         with open(letter_path, "w", encoding="utf-8") as f:
             f.write(letter)
         print(f"\n  Dispute letter saved -> {letter_path}")
-        print("  Preview (first 600 chars):")
-        print("  " + letter[:600].replace("\n", "\n  "))
+    elif routing == "human_review":
+        print("\n  No dispute letter filed (all findings in human review queue).")
+
+    batch_summary = final_state.get("batch_summary", "")
+    if batch_summary:
+        print(f"\n  Batch narrative:\n  {batch_summary[:400]}")
 
     print("\n" + "=" * 70 + "\n")
 

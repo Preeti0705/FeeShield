@@ -29,6 +29,7 @@ from src.rootcause.classifier import classify_fee_root_cause, classify_lifecycle
 from src.confidence.scorer import compute_confidence_score
 from src.evidence.builder import build_fee_claim_item, build_bank_claim_item, ClaimItem
 from src.leakage.aggregator import aggregate_audit_results, AuditBatchSummary
+from src.cash_impact.position_calculator import compute_cash_position
 
 DATA_DIR = Path(__file__).parent / "data"
 TWO_DP = Decimal("0.01")
@@ -168,6 +169,31 @@ def run_full_audit(verbose: bool = True) -> tuple[AuditBatchSummary, list[ClaimI
 
         print(f"\n[Generated Claims] Saved {len(claim_items)} actionable claims -> {claim_csv_path}")
         print("=" * 70 + "\n")
+
+    # 8. Cash position report (Day 8)
+    if verbose:
+        # Rs 400,000 = representative 7-day obligations (payroll + key vendors)
+        # In production this comes from ERP/payroll system; adjust to your actual figure
+        OBLIGATIONS_7D = Decimal("400000")
+        bank_gaps_as_dicts = [g.to_dict() for g in bank_gaps]
+        audit_dict = {
+            "total_fee_leakage_inr":       str(summary.total_fee_leakage_inr),
+            "total_bank_cash_at_risk_inr": str(summary.total_bank_cash_at_risk_inr),
+            "total_volume_inr":            str(summary.total_volume_inr),
+        }
+        cash_pos = compute_cash_position(
+            bank_gaps=bank_gaps_as_dicts,
+            audit_summary_dict=audit_dict,
+            obligations_7d_inr=OBLIGATIONS_7D,
+        )
+        print(cash_pos.as_text_report())
+        violations = cash_pos.validate()
+        if violations:
+            print("[WARN] Cash position invariant violations:")
+            for v in violations:
+                print(f"  - {v}")
+        else:
+            print("  [OK] Cash position invariants verified")
 
     return summary, claim_items
 

@@ -3,35 +3,79 @@ src/agent/graph.py
 ==================
 Builds and compiles the LangGraph multi-agent audit graph.
 
-Graph topology:
-  START → investigator → reviewer → orchestrator → END
+Graph topology (Day 6 — conditional edges):
 
-Why this linear topology (not parallel)?
-  Each agent depends on the previous agent's output:
-  - Reviewer needs Investigator's findings to verify them.
-  - Orchestrator needs Reviewer's verdicts to know which claims are approved.
-  A parallel topology makes no sense here — this is a sequential verification chain.
+  START → investigator → reviewer ──┬── (approved/escalate) ──→ orchestrator → END
+                                     └── (human_review)      ──→ END
 
-Why LangGraph instead of a hand-written loop?
-  LangGraph gives us:
-  1. State persistence — every step's output is preserved, inspectable, and replayable.
-  2. Checkpointing — if the LLM call fails mid-run, LangGraph can resume from the last checkpoint.
-  3. Streaming — the graph can stream partial outputs so a UI can show progress live.
-  4. Visualisation — graph.get_graph().draw_mermaid() gives an automatic flowchart.
+Why conditional edges?
+  The Reviewer is the mathematical backstop.  If it detects a disagreement between
+  the LLM's root-cause label and the deterministic classifier's label, there is no
+  safe path to automatic resolution — the finding must sit in the human review queue.
+  Routing directly to END means no dispute letter is filed for that case; instead,
+  the state carries `human_review_pids` so the CLI / dashboard can surface it.
+
+  Two paths reach the Orchestrator:
+  - 'approved':  all findings verified, Orchestrator writes dispute letter normally.
+  - 'escalate':  at least one high-value disagreement (> Rs 1,000); Orchestrator is
+                 still invoked because the financial stakes are too high to drop, but
+                 the routing_decision it returns will always be 'escalate'.
+
+Why LangGraph instead of a hand-written if/else loop?
+  1. State persistence — every step's output is preserved, inspectable, replayable.
+  2. Conditional edges are first-class — the branching logic lives in the graph
+     definition, not scattered across node code.  Graph topology is visible by calling
+     graph.get_graph().draw_mermaid().
+  3. Streaming — the graph can emit partial state as each node completes, which the
+     Streamlit dashboard (Day 9) will use to show live progress.
+
+State fields driving the conditional edge:
+  state['reviewer_verdict']:
+    'approved'     → all findings verified → orchestrator
+    'escalate'     → high-value mismatch, still needs dispute letter → orchestrator
+    'human_review' → lower-value disagreement, route to human queue → END
 
 How to use:
   from src.agent.graph import build_audit_graph, run_agent_audit
-  result = run_agent_audit(variance_records, bank_gaps, claim_items, contract_rules_dicts, batch_stats)
-  print(result["dispute_letter"])
-  print(result["routing_decision"])
+  result = run_agent_audit(variance_records, bank_gaps, claim_items,
+                           contract_rules_dicts, batch_summary_stats)
+  print(result["routing_decision"])        # escalate | claim | monitor | no_action
+  print(result["human_review_pids"])       # PIDs that need a human
+  print(result["dispute_letter"])          # formal markdown letter (if any)
 """
 
 from functools import partial
+from typing import Literal
+
 from langgraph.graph import StateGraph, START, END
 
 from src.agent.state import AuditState
 from src.agent.nodes import investigator_node, reviewer_node, orchestrator_node
 
+
+# ── Conditional edge function ─────────────────────────────────────────────────
+
+def _reviewer_router(state: AuditState) -> Literal["orchestrator", "human_queue"]:
+    """
+    Reads the Reviewer's verdict and decides the next node.
+
+    Returns a string that LangGraph matches against the conditional edge map:
+      'orchestrator' → proceed to Orchestrator for dispute letter generation
+      'human_queue'  → route to END without filing a claim
+
+    Why 'escalate' also goes to 'orchestrator':
+      Escalation means the financial impact is HIGH, so we still need the
+      Orchestrator to write a formal letter — but the Orchestrator's routing_decision
+      will be forced to 'escalate' by the Reviewer's verdict being passed through state.
+    """
+    verdict = state.get("reviewer_verdict", "approved")
+    if verdict in ("approved", "escalate"):
+        return "orchestrator"
+    # 'human_review' → do not file; surface via human_review_pids
+    return "human_queue"
+
+
+# ── Graph builder ─────────────────────────────────────────────────────────────
 
 def build_audit_graph(
     contract_rules_dicts: list[dict],
@@ -39,7 +83,7 @@ def build_audit_graph(
     batch_summary_stats:  dict,
 ):
     """
-    Build and compile the three-agent audit graph.
+    Build and compile the three-agent audit graph with conditional routing.
 
     Parameters
     ----------
@@ -50,28 +94,70 @@ def build_audit_graph(
     Returns
     -------
     Compiled LangGraph graph ready to invoke.
+
+    Graph topology (as Mermaid, generated by graph.get_graph().draw_mermaid()):
+      START → investigator → reviewer → [conditional] → orchestrator → END
+                                                       ↘ human_queue → END
     """
     builder = StateGraph(AuditState)
 
     # Wrap nodes with their closed-over data using functools.partial
-    inv_node   = partial(investigator_node, contract_rules_dicts=contract_rules_dicts)
-    orch_node  = partial(orchestrator_node,
-                         approved_claims=approved_claims,
-                         batch_summary_stats=batch_summary_stats)
+    inv_node  = partial(investigator_node, contract_rules_dicts=contract_rules_dicts)
+    orch_node = partial(orchestrator_node,
+                        approved_claims=approved_claims,
+                        batch_summary_stats=batch_summary_stats)
 
     # Add nodes
-    builder.add_node("investigator", inv_node)
-    builder.add_node("reviewer",     reviewer_node)
-    builder.add_node("orchestrator", orch_node)
+    builder.add_node("investigator",  inv_node)
+    builder.add_node("reviewer",      reviewer_node)
+    builder.add_node("orchestrator",  orch_node)
+    builder.add_node("human_queue",   _human_queue_node)  # terminal: no further action
 
-    # Add edges: linear chain
-    builder.add_edge(START,          "investigator")
-    builder.add_edge("investigator", "reviewer")
-    builder.add_edge("reviewer",     "orchestrator")
+    # Edges
+    builder.add_edge(START,           "investigator")
+    builder.add_edge("investigator",  "reviewer")
+
+    # Conditional edge out of reviewer
+    builder.add_conditional_edges(
+        "reviewer",
+        _reviewer_router,
+        {
+            "orchestrator": "orchestrator",
+            "human_queue":  "human_queue",
+        },
+    )
+
     builder.add_edge("orchestrator", END)
+    builder.add_edge("human_queue",  END)
 
     return builder.compile()
 
+
+def _human_queue_node(state: AuditState) -> dict:
+    """
+    Terminal node for findings that need human review.
+    Does NOT file a claim or write a dispute letter.
+    Emits a routing_decision of 'human_review' and a clear batch summary.
+
+    The dashboard (Day 9) will read state['human_review_pids'] to show
+    exactly which payment IDs are waiting for a human decision.
+    """
+    pids = state.get("human_review_pids", [])
+    summary = (
+        f"Reviewer detected label disagreement for {len(pids)} payment(s): "
+        f"{', '.join(pids)}. "
+        "These findings require human inspection before a dispute letter can be filed. "
+        "All other payments have been auto-matched and require no action."
+    )
+    return {
+        "routing_decision": "human_review",
+        "dispute_letter":   "",
+        "final_claims":     [],
+        "batch_summary":    summary,
+    }
+
+
+# ── Convenience runner ────────────────────────────────────────────────────────
 
 def run_agent_audit(
     variance_records:     list[dict],
@@ -95,7 +181,7 @@ def run_agent_audit(
 
     Returns
     -------
-    Final AuditState dict with dispute_letter, routing_decision, reviews, etc.
+    Final AuditState dict with routing_decision, reviews, human_review_pids, etc.
     """
     # Approved claims = fee claims + escalated bank claims from claim_items
     approved_claims = [c for c in claim_items if c.get("confidence_score", 0) >= 85]
@@ -108,20 +194,24 @@ def run_agent_audit(
 
     # Filter to just flagged payments if payment_ids list provided
     if payment_ids is None:
-        payment_ids = list({r["payment_id"] for r in variance_records if r.get("has_variance")} |
-                          {g["payment_id"] for g in bank_gaps if g.get("should_escalate")})
+        payment_ids = list(
+            {r["payment_id"] for r in variance_records if r.get("has_variance")} |
+            {g["payment_id"] for g in bank_gaps if g.get("should_escalate")}
+        )
 
     initial_state: AuditState = {
-        "payment_ids":      payment_ids,
-        "variance_records": variance_records,
-        "bank_gaps":        bank_gaps,
-        "claim_items":      claim_items,
-        "investigations":   [],
-        "reviews":          [],
-        "final_claims":     [],
-        "dispute_letter":   "",
-        "routing_decision": "",
-        "batch_summary":    "",
+        "payment_ids":       payment_ids,
+        "variance_records":  variance_records,
+        "bank_gaps":         bank_gaps,
+        "claim_items":       claim_items,
+        "investigations":    [],
+        "reviews":           [],
+        "reviewer_verdict":  "",
+        "human_review_pids": [],
+        "final_claims":      [],
+        "dispute_letter":    "",
+        "routing_decision":  "",
+        "batch_summary":     "",
     }
 
     final_state = graph.invoke(initial_state)
