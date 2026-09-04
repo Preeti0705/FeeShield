@@ -250,8 +250,6 @@ python -m pytest tests/ -v
 
 ## Build log
 
-See [`GUIDE.md`](./GUIDE.md) for the complete day-by-day build narrative — every conceptual decision explained, every command shown, and every test result recorded.
-
 | Day | What was built | Tests |
 |---|---|---|
 | 1-2 | Data generator, contract resolver, fee calculator | 35 |
