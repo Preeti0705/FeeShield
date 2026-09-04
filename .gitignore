@@ -1,4 +1,3 @@
-@(
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -11,3 +10,14 @@ ENV/
 
 # Documentation
 GUIDE.md
+guide.md
+Guide.md
+
+# Environment variables
+.env
+.env.*
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/

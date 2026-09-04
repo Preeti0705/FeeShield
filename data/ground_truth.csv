@@ -1,9 +1,14 @@
-case_id,payment_id,case_type,description,expected_leakage_inr,should_flag
-GT001,PAY001,wrong_mdr,Gateway applied 1.80% instead of contracted 1.50% (CON002),35.400000,True
-GT002,PAY002,missed_volume_tier,Tier rate 1.20% applies (GMV>5L); gateway used 1.50%,53.100000,True
-GT003,PAY003,wrong_tax_base,GST 18% on gross ₹20000 instead of on MDR fee,3542.400000,True
-GT004,PAY004,duplicate_fee,MDR + tax deducted twice in same settlement for ₹8000 debit,70.800000,True
-GT005,PAY005,legitimate_refund,"Customer refund — correctly processed, not leakage",0.000000,False
-GT006,PAY006,legitimate_chargeback,Chargeback with contractual dispute fee — not leakage,0.000000,False
-GT007,PAY007,timing_difference,"Mar-30 txn settled Apr-2 — cross-month lag, not an error",0.000000,False
-GT008,PAY008,contract_version_violation,Feb-15 txn: gateway used stale CON001 (V1) rate 1.80% instead of CON002 rate 1.50%,31.860000,True
+case_id,payment_id,case_type,description,expected_leakage_inr,should_flag,bank_case_type,expected_bank_impact,bank_posting_state
+GT001,PAY001,wrong_mdr,Gateway applied 1.80% instead of contracted 1.50% (CON002),35.400000,True,,0.000000,not_applicable
+GT002,PAY002,missed_volume_tier,Tier rate 1.20% applies (GMV>5L); gateway used 1.50%,53.100000,True,,0.000000,not_applicable
+GT003,PAY003,wrong_tax_base,GST 18% on gross Rs20000 instead of on MDR fee,3542.400000,True,,0.000000,not_applicable
+GT004,PAY004,duplicate_fee,MDR + tax deducted twice in same settlement for Rs8000 debit,70.800000,True,,0.000000,not_applicable
+GT005,PAY005,legitimate_refund,"Customer refund -- correctly processed, not leakage",0.000000,False,,0.000000,not_applicable
+GT006,PAY006,legitimate_chargeback,Chargeback with contractual dispute fee -- not leakage,0.000000,False,,0.000000,not_applicable
+GT007,PAY007,timing_difference,"Mar-30 txn settled Apr-2 -- cross-month lag, not an error",0.000000,False,,0.000000,not_applicable
+GT008,PAY008,contract_version_violation,Feb-15 txn: gateway used stale CON001 (V1) rate 1.80% instead of CON002 rate 1.50%,31.860000,True,,0.000000,not_applicable
+GT009,PAY009,bank_posting_anomaly,"SEL009: settlement created, never posted to merchant's bank account",0.000000,True,SETTLEMENT_NOT_POSTED,17660.160000,not_posted
+GT010,PAY010,bank_posting_anomaly,SEL010: settlement posted 7 days after settlement date (SLA=3 days),0.000000,True,SETTLEMENT_POSTED_LATE,0.000000,posted_late
+GT011,PAY011,bank_posting_anomaly,SEL011: posted Rs500 less than settled net amount,0.000000,True,POSTED_AMOUNT_MISMATCH,500.000000,amount_mismatch
+GT012,PAY012,bank_posting_anomaly,SEL012: bank posted then reversed -- net merchant cash = Rs0,0.000000,True,POSTING_REVERSED,10805.300000,reversed
+GT013,PAY013,bank_posting_anomaly,SEL013: hold placed then cleared within 2 days -- within normal window,0.000000,False,HOLD_PLACED_THEN_CLEARED,0.000000,hold_cleared
