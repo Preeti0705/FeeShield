@@ -8,10 +8,6 @@ __pycache__/
 venv/
 ENV/
 
-# Documentation
-GUIDE.md
-guide.md
-Guide.md
 
 # Environment variables
 .env
