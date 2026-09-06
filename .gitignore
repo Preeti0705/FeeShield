@@ -13,12 +13,6 @@ ENV/
 .env
 .env.*
 
-# Testing & Cache
-.pytest_cache/
-.coverage
-htmlcov/
-pytest.ini
-
 # Local Documentation / Guides
 GUIDE.md
 guide.md
